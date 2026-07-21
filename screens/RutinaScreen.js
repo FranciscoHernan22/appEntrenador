@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 
-const API_BASE = 'http://192.168.0.254:8000';
+import { API_URL } from '../config';
 const { width: SW, height: SH } = Dimensions.get('window');
 
 const TIPO_ETIQUETA = {
@@ -38,6 +38,16 @@ function serieCompleta(serie) {
   if (m === 'parciales') return !!serie.peso_pc;
   if (m === 'negativas') return !!serie.peso_ng;
   return !!serie.peso;
+}
+
+// Formatea segundos totales -> "1m 30s" / "45s" / "2m" / null si no hay valor
+function formatearDescanso(segTotal) {
+  const total = parseInt(segTotal) || 0;
+  if (total === 0) return null;
+  const m = Math.floor(total / 60), s = total % 60;
+  if (m === 0) return `${s}s`;
+  if (s === 0) return `${m}m`;
+  return `${m}m ${s}s`;
 }
 
 function cloneBloques(bloques) {
@@ -146,7 +156,7 @@ export default function RutinaScreen({ route }) {
   function seleccionarOpcion(val) { if (selectorCb) selectorCb(val); setSelectorVisible(false); }
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/rutina/${clienteId}/${semana}/${dia}`)
+    fetch(`${API_URL}/rutina/${clienteId}/${semana}/${dia}`)
       .then(r => { if (!r.ok) throw new Error(`Error ${r.status}`); return r.json(); })
       .then(json => { setSesion(json); setData(cloneBloques(json.bloques ?? [])); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });
@@ -157,7 +167,7 @@ export default function RutinaScreen({ route }) {
     setSaveStatus('saving');
     try {
       const res = await fetch(
-        `${API_BASE}/api/rutina/${clienteId}/${semana}/${dia}/pesos/`,
+        `${API_URL}/rutina/${clienteId}/${semana}/${dia}/pesos/`,
         { method:'PATCH', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({ bloques: dataActual }) }
       );
@@ -357,6 +367,7 @@ function BloqueCard({ bloque, bloqueIdx, setCampo, abrirSelector, abrirVideo,
 
   const tipo      = TIPO_ETIQUETA[bloque.tipo] ?? TIPO_ETIQUETA.MONOSERIE;
   const numSeries = bloque.ejercicios[0]?.series?.length ?? 0;
+  const descansosSerie = bloque.descansos_serie ?? [];
   const scrollsRef = useRef({});
 
   function scrollTodos(si) {
@@ -384,13 +395,6 @@ function BloqueCard({ bloque, bloqueIdx, setCampo, abrirSelector, abrirVideo,
             ? bloque.ejercicios[0].nombre
             : `${bloque.ejercicios.length} ejercicios`}
         </Text>
-        {!!bloque.descanso_valor && (
-          <View style={s.descansoBadge}>
-            <Text style={s.descansoBadgeText}>
-              💤 {bloque.descanso_valor} {bloque.descanso_unidad ?? 'seg'}
-            </Text>
-          </View>
-        )}
       </View>
 
       <View style={s.seriesHeaderRow}>
@@ -412,6 +416,7 @@ function BloqueCard({ bloque, bloqueIdx, setCampo, abrirSelector, abrirVideo,
           abrirImagen={abrirImagen}
           scrollsRef={scrollsRef}
           serieHecha={(si) => bloqueSerieYaHecha(si)}
+          descansosSerie={descansosSerie}
         />
       ))}
 
@@ -444,7 +449,7 @@ function BloqueCard({ bloque, bloqueIdx, setCampo, abrirSelector, abrirVideo,
    EJERCICIO ROW
 ───────────────────────────────────────── */
 function EjercicioRow({ ej, ejIdx, bloqueIdx, isLast, setCampo, abrirSelector,
-  abrirVideo, abrirImagen, scrollsRef, serieHecha }) {
+  abrirVideo, abrirImagen, scrollsRef, serieHecha, descansosSerie }) {
 
   const scrollRef = useRef(null);
 
@@ -515,6 +520,7 @@ function EjercicioRow({ ej, ejIdx, bloqueIdx, isLast, setCampo, abrirSelector,
               onChange={(key, val) => setCampo(bloqueIdx, ejIdx, si, key, val)}
               abrirSelector={abrirSelector}
               done={serieHecha(si)}
+              descanso={descansosSerie?.[si]?.valor}
             />
           ))}
         </ScrollView>
@@ -526,7 +532,7 @@ function EjercicioRow({ ej, ejIdx, bloqueIdx, isLast, setCampo, abrirSelector,
 /* ─────────────────────────────────────────
    SERIE COL
 ───────────────────────────────────────── */
-function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done }) {
+function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done, descanso }) {
   const m = serie.metodo ?? 'normal';
   const tempoActivo = serie.tempo_activo === '1' || serie.tempo_activo === true;
   const tE = serie.tempo_excentrica  ?? '0';
@@ -537,6 +543,7 @@ function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done }) {
   const rirModo   = (serie.rir_modo ?? 'rir').toUpperCase();
   const rirVal    = serie.rir_valor ?? '';
   const hayRir    = rirActivo && !!rirVal;
+  const descansoTxt = formatearDescanso(descanso);
 
   return (
     <View style={[s.serieCol, done && s.serieColDone, !isLast && { marginRight:5 }]}>
@@ -568,6 +575,11 @@ function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done }) {
       {hayRir && (
         <View style={s.rirBadge}>
           <Text style={s.rirText}>{rirModo} {rirVal}</Text>
+        </View>
+      )}
+      {!!descansoTxt && (
+        <View style={s.descansoSerieBadge}>
+          <Text style={s.descansoSerieBadgeText}>💤 {descansoTxt}</Text>
         </View>
       )}
       {done && (
@@ -830,9 +842,6 @@ const s = StyleSheet.create({
   bloqueTag:     { paddingHorizontal:8, paddingVertical:2, borderRadius:99 },
   bloqueTagText: { fontSize:9, fontWeight:'700', letterSpacing:0.8 },
   bloqueNombre:  { fontSize:11, color:'#6b7280', flex:1 },
-  descansoBadge: { backgroundColor:'#ecfdf5', borderRadius:99, paddingHorizontal:7,
-                   paddingVertical:2, borderWidth:1, borderColor:'#a7f3d0' },
-  descansoBadgeText: { fontSize:9, fontWeight:'700', color:'#059669' },
 
   seriesHeaderRow:   { flexDirection:'row', borderBottomWidth:2, borderBottomColor:'#e2e5ea', backgroundColor:'#f0f2f5' },
   colInfoHeader:     { flex:1, borderRightWidth:1, borderRightColor:'#e2e5ea', paddingVertical:5, paddingHorizontal:10, justifyContent:'center' },
@@ -881,6 +890,12 @@ const s = StyleSheet.create({
   rirBadge: { width:'100%', backgroundColor:'#f5f3ff', borderRadius:4,
               paddingVertical:3, paddingHorizontal:4, marginTop:3, alignItems:'center' },
   rirText:  { fontSize:9, fontWeight:'700', color:'#7c3aed' },
+
+  // ── Descanso por serie ──
+  descansoSerieBadge:     { width:'100%', backgroundColor:'#ecfdf5', borderRadius:4,
+                            paddingVertical:3, paddingHorizontal:4, marginTop:3,
+                            alignItems:'center', borderWidth:1, borderColor:'#a7f3d0' },
+  descansoSerieBadgeText: { fontSize:9, fontWeight:'700', color:'#059669' },
 
   pesoRow:             { flexDirection:'row', alignItems:'center', width:'100%', gap:3, marginTop:4 },
   pesoTrigger:         { flex:1, flexDirection:'row', alignItems:'center', justifyContent:'space-between',

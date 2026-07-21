@@ -7,7 +7,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://127.0.0.1:8000/api';
+import { API_URL } from '../config';
 
 export default function LoginScreen({ navigation }) {
   const [email, setEmail]       = useState('');
@@ -22,9 +22,12 @@ export default function LoginScreen({ navigation }) {
 
     setLoading(true);
     try {
-      const res  = await fetch(`${BASE_URL}/login`, {
+      const res  = await fetch(`${API_URL}/login`, {
         method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept':       'application/json',
+        },
         body:    JSON.stringify({ email, password }),
       });
       const data = await res.json();

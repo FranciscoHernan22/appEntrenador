@@ -6,7 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://192.168.0.254:8000/api';
+import { API_URL } from '../config';
 
 export default function HomeScreen({ navigation }) {
   const [plan, setPlan]               = useState(null);
@@ -21,7 +21,7 @@ export default function HomeScreen({ navigation }) {
       const token = await AsyncStorage.getItem('token');
       if (!id || !token) { setLoading(false); return; }
 
-      const res  = await fetch(`${BASE_URL}/cliente/${id}/semana-actual`, {
+      const res  = await fetch(`${API_URL}/cliente/${id}/semana-actual`, {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type':  'application/json',

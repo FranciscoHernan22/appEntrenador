@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://127.0.0.1:8000/api';
+import { API_URL } from '../config';
 const DIAS_NOMBRE = ['', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
 
 export default function SemanasScreen({ navigation }) {
@@ -33,7 +33,7 @@ export default function SemanasScreen({ navigation }) {
     if (esRefresh) setRefresh(true); else setLoading(true);
     try {
       const token = await AsyncStorage.getItem('token');
-      const res   = await fetch(`${BASE_URL}/cliente/${clienteId}/semanas`, {
+      const res   = await fetch(`${API_URL}/cliente/${clienteId}/semanas`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       const json = await res.json();

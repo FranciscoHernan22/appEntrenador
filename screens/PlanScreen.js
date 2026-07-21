@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://127.0.0.1:8000/api';
+import { API_URL } from '../config';
 const DIAS_NOMBRE = ['', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
 const { width: SW } = Dimensions.get('window');
 
@@ -37,7 +37,7 @@ export default function PlanScreen({ navigation }) {
     if (esRefresh) setRefresh(true); else setLoading(true);
     try {
       const token = await AsyncStorage.getItem('token');
-      const res   = await fetch(`${BASE_URL}/cliente/${clienteId}/semanas`, {
+      const res   = await fetch(`${API_URL}/cliente/${clienteId}/semanas`, {
         headers: { 'Authorization': `Bearer ${token}` },
       });
       const json = await res.json();
@@ -62,7 +62,7 @@ export default function PlanScreen({ navigation }) {
   const completarDia = async (semana, dia) => {
     const token = await AsyncStorage.getItem('token');
     await fetch(
-      `${BASE_URL}/cliente/${clienteId}/semana/${semana}/dia/${dia}/completar`,
+      `${API_URL}/cliente/${clienteId}/semana/${semana}/dia/${dia}/completar`,
       { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } }
     );
     cargar();
