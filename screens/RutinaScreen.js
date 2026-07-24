@@ -5,6 +5,7 @@ import {
   Dimensions,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 import { API_URL } from '../config';
 const { width: SW, height: SH } = Dimensions.get('window');
@@ -77,7 +78,7 @@ function generarOpciones(unidad) {
 /* ─────────────────────────────────────────
    MODAL IMAGEN FULLSCREEN
 ───────────────────────────────────────── */
-function ImagenModal({ visible, uri, nombre, onClose }) {
+function ImagenModal({ visible, uri, nombre, video, onClose, onVerVideo }) {
   if (!uri) return null;
   return (
     <Modal
@@ -89,9 +90,19 @@ function ImagenModal({ visible, uri, nombre, onClose }) {
     >
       <View style={im.overlay}>
         <Image source={{ uri }} style={im.imagen} resizeMode="contain" />
-        {!!nombre && (
-          <View style={im.nombreWrap}>
-            <Text style={im.nombreText} numberOfLines={2}>{nombre}</Text>
+        {(!!nombre || !!video) && (
+          <View style={im.bottomBar}>
+            {!!nombre && (
+              <Text style={im.nombreText} numberOfLines={2}>{nombre}</Text>
+            )}
+            {!!video && (
+              <TouchableOpacity style={im.videoBtn} onPress={onVerVideo} activeOpacity={0.85}>
+                <View style={im.videoBtnCirculo}>
+                  <Text style={im.videoBtnIcono}>▶</Text>
+                </View>
+                <Text style={im.videoBtnTexto}>Ver video</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
         <TouchableOpacity style={im.cerrarBtn} onPress={onClose} activeOpacity={0.8}>
@@ -105,13 +116,24 @@ function ImagenModal({ visible, uri, nombre, onClose }) {
 const im = StyleSheet.create({
   overlay:    { flex:1, backgroundColor:'#000', alignItems:'center', justifyContent:'center' },
   imagen:     { width:SW, height:SH },
-  nombreWrap: { position:'absolute', bottom:48, left:0, right:0, alignItems:'center', paddingHorizontal:24 },
-  nombreText: { fontSize:15, fontWeight:'700', color:'white', textAlign:'center',
+  bottomBar:  { position:'absolute', left:0, right:0, bottom:0,
+                paddingTop:22, paddingBottom:46, paddingHorizontal:28,
+                backgroundColor:'rgba(0,0,0,0.55)',
+                alignItems:'center' },
+  nombreText: { fontSize:16, fontWeight:'700', color:'white', textAlign:'center',
                 textShadowColor:'rgba(0,0,0,0.9)', textShadowOffset:{width:0,height:1}, textShadowRadius:6 },
   cerrarBtn:  { position:'absolute', top:52, right:20, width:36, height:36, borderRadius:18,
                 backgroundColor:'rgba(255,255,255,0.15)', borderWidth:1,
                 borderColor:'rgba(255,255,255,0.3)', alignItems:'center', justifyContent:'center' },
   cerrarTxt:  { color:'white', fontSize:16, fontWeight:'700' },
+  videoBtn:       { marginTop:14, flexDirection:'row',
+                    alignItems:'center', gap:8, backgroundColor:'rgba(255,255,255,0.14)',
+                    borderWidth:1, borderColor:'rgba(255,255,255,0.35)', borderRadius:99,
+                    paddingVertical:9, paddingHorizontal:18 },
+  videoBtnCirculo:{ width:22, height:22, borderRadius:11, backgroundColor:'#fff',
+                    alignItems:'center', justifyContent:'center' },
+  videoBtnIcono:  { fontSize:9, color:'#111827', marginLeft:1 },
+  videoBtnTexto:  { color:'#fff', fontSize:13, fontWeight:'700' },
 });
 
 /* ─────────────────────────────────────────
@@ -136,13 +158,13 @@ export default function RutinaScreen({ route }) {
   const [videoUrl, setVideoUrl]         = useState('');
   const [videoTitulo, setVideoTitulo]   = useState('');
 
-  const [imgModal, setImgModal] = useState({ visible:false, uri:'', nombre:'' });
+  const [imgModal, setImgModal] = useState({ visible:false, uri:'', nombre:'', video:'' });
 
   const mainScrollRef = useRef(null);
   const bloqueRefs    = useRef({});
   const saveTimer     = useRef(null);
 
-  function abrirImagen(uri, nombre) { setImgModal({ visible:true, uri, nombre }); }
+  function abrirImagen(uri, nombre, video) { setImgModal({ visible:true, uri, nombre, video: video ?? '' }); }
   function cerrarImagen() { setImgModal(prev => ({ ...prev, visible:false })); }
   function abrirVideo(url, nombre) { setVideoUrl(url ?? ''); setVideoTitulo(nombre ?? ''); setVideoVisible(true); }
   function abrirSelector(opciones, valorActual, titulo, callback) {
@@ -320,7 +342,12 @@ export default function RutinaScreen({ route }) {
         visible={imgModal.visible}
         uri={imgModal.uri}
         nombre={imgModal.nombre}
+        video={imgModal.video}
         onClose={cerrarImagen}
+        onVerVideo={() => {
+          cerrarImagen();
+          abrirVideo(imgModal.video, imgModal.nombre);
+        }}
       />
 
       <Modal visible={selectorVisible} transparent animationType="slide" onRequestClose={cerrarSelector}>
@@ -465,7 +492,7 @@ function EjercicioRow({ ej, ejIdx, bloqueIdx, isLast, setCampo, abrirSelector,
     ]}>
       <TouchableOpacity
         style={s.colImg}
-        onPress={() => ej.imagen && abrirImagen(ej.imagen, ej.nombre)}
+        onPress={() => ej.imagen && abrirImagen(ej.imagen, ej.nombre, ej.video)}
         activeOpacity={ej.imagen ? 0.8 : 1}
         disabled={!ej.imagen}
       >
@@ -477,11 +504,14 @@ function EjercicioRow({ ej, ejIdx, bloqueIdx, isLast, setCampo, abrirSelector,
         }
         {ej.video && (
           <TouchableOpacity
-            style={s.playBadge}
+            style={s.videoPlayCircleWrap}
             onPress={() => abrirVideo(ej.video, ej.nombre)}
             activeOpacity={0.75}
+            hitSlop={{ top:8, bottom:8, left:8, right:8 }}
           >
-            <Text style={s.playBadgeTxt}>▶</Text>
+            <View style={s.videoPlayCircle}>
+              <Text style={s.videoPlayIcon}>▶</Text>
+            </View>
           </TouchableOpacity>
         )}
       </TouchableOpacity>
@@ -756,32 +786,58 @@ function resolverEmbedUrl(url) {
   return null;
 }
 
+// Reproductor para los videos que subimos nosotros (mp4 en R2, no YouTube/Vimeo)
+function VideoDirecto({ url }) {
+  const player = useVideoPlayer(url, (p) => {
+    p.loop = false;
+    p.play();
+  });
+
+  return (
+    <VideoView
+      style={vs.player}
+      player={player}
+      nativeControls
+      allowsFullscreen
+      contentFit="contain"
+    />
+  );
+}
+
 function VideoModal({ visible, url, titulo, onClose }) {
   const embedUrl = resolverEmbedUrl(url);
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={vs.wrap}>
-        <TouchableOpacity style={vs.fondo} activeOpacity={1} onPress={onClose} />
-        <View style={vs.sheet}>
-          <View style={vs.handle} />
-          <View style={vs.header}>
-            <Text style={vs.titulo} numberOfLines={1}>{titulo}</Text>
-            <TouchableOpacity onPress={onClose} style={vs.cerrarBtn}>
-              <Text style={vs.cerrarTxt}>✕</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={vs.playerWrap}>
-            {embedUrl ? (
+    <Modal
+      visible={visible}
+      transparent={false}
+      animationType="fade"
+      onRequestClose={onClose}
+      statusBarTranslucent
+    >
+      <View style={vs.fullWrap}>
+        <View style={vs.playerFull}>
+          {/* Montamos el player solo mientras el modal está visible, así se
+              pausa/libera solo al cerrar en vez de seguir sonando de fondo. */}
+          {visible && (
+            embedUrl ? (
               <WebView source={{ uri: embedUrl }} style={vs.player}
                 allowsFullscreenVideo javaScriptEnabled mediaPlaybackRequiresUserAction={false} />
+            ) : url ? (
+              <VideoDirecto url={url} />
             ) : (
               <View style={vs.sinVideo}>
-                <Text style={vs.sinVideoTxt}>
-                  {url ? 'Sin preview — abre en YouTube' : 'Sin video disponible'}
-                </Text>
+                <Text style={vs.sinVideoTxt}>Sin video disponible</Text>
               </View>
-            )}
-          </View>
+            )
+          )}
+        </View>
+
+        <View style={vs.topBar} pointerEvents="box-none">
+          <View style={vs.topBarScrim} pointerEvents="none" />
+          <Text style={vs.tituloFull} numberOfLines={1}>{titulo}</Text>
+          <TouchableOpacity onPress={onClose} style={vs.cerrarBtnFull} activeOpacity={0.8}>
+            <Text style={vs.cerrarTxtFull}>✕</Text>
+          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -792,18 +848,21 @@ function VideoModal({ visible, url, titulo, onClose }) {
    ESTILOS
 ───────────────────────────────────────── */
 const vs = StyleSheet.create({
-  wrap:        { flex:1, justifyContent:'flex-end' },
-  fondo:       { flex:1, backgroundColor:'rgba(0,0,0,0.6)' },
-  sheet:       { backgroundColor:'#111827', borderTopLeftRadius:18, borderTopRightRadius:18 },
-  handle:      { width:40, height:4, backgroundColor:'#374151', borderRadius:2, alignSelf:'center', marginTop:10 },
-  header:      { flexDirection:'row', alignItems:'center', paddingHorizontal:16, paddingVertical:10, borderBottomWidth:1, borderBottomColor:'#1f2937' },
-  titulo:      { flex:1, fontSize:14, fontWeight:'700', color:'#f9fafb' },
-  cerrarBtn:   { width:28, height:28, borderRadius:14, backgroundColor:'#374151', alignItems:'center', justifyContent:'center', marginLeft:8 },
-  cerrarTxt:   { fontSize:12, color:'#9ca3af', fontWeight:'700' },
-  playerWrap:  { width:'100%', aspectRatio:16/9, backgroundColor:'#000' },
-  player:      { flex:1, backgroundColor:'#000' },
-  sinVideo:    { flex:1, alignItems:'center', justifyContent:'center' },
-  sinVideoTxt: { color:'#6b7280', fontSize:13 },
+  fullWrap:      { flex:1, backgroundColor:'#000' },
+  playerFull:    { flex:1, justifyContent:'center' },
+  player:        { flex:1, backgroundColor:'#000' },
+  sinVideo:      { flex:1, alignItems:'center', justifyContent:'center' },
+  sinVideoTxt:   { color:'#6b7280', fontSize:13 },
+
+  topBar:        { position:'absolute', top:0, left:0, right:0,
+                   flexDirection:'row', alignItems:'center',
+                   paddingTop:52, paddingHorizontal:16, paddingBottom:16 },
+  topBarScrim:   { ...StyleSheet.absoluteFillObject, backgroundColor:'rgba(0,0,0,0.5)' },
+  tituloFull:    { flex:1, fontSize:15, fontWeight:'700', color:'#fff' },
+  cerrarBtnFull: { width:34, height:34, borderRadius:17, backgroundColor:'rgba(255,255,255,0.16)',
+                   borderWidth:1, borderColor:'rgba(255,255,255,0.28)',
+                   alignItems:'center', justifyContent:'center', marginLeft:12 },
+  cerrarTxtFull: { color:'#fff', fontSize:15, fontWeight:'700' },
 });
 
 const s = StyleSheet.create({
@@ -859,6 +918,13 @@ const s = StyleSheet.create({
   playBadge:    { position:'absolute', top:5, right:5, width:26, height:26, borderRadius:13,
                   backgroundColor:'rgba(0,0,0,0.65)', alignItems:'center', justifyContent:'center' },
   playBadgeTxt: { color:'white', fontSize:10 },
+  videoPlayCircleWrap: { position:'absolute', top:6, right:6 },
+  videoPlayCircle: { width:24, height:24, borderRadius:12, backgroundColor:'rgba(17,24,39,0.62)',
+                      alignItems:'center', justifyContent:'center',
+                      borderWidth:1, borderColor:'rgba(255,255,255,0.8)',
+                      shadowColor:'#000', shadowOpacity:0.25, shadowRadius:3, shadowOffset:{width:0,height:1},
+                      elevation:3 },
+  videoPlayIcon: { fontSize:9, color:'#fff', marginLeft:1 },
 
   colDerecha: { flex:1, flexDirection:'column' },
 
