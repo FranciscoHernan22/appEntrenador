@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, Modal, StyleSheet,
   Image, TouchableOpacity, ActivityIndicator,
-  Dimensions,
+  Dimensions, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -29,16 +29,134 @@ const METODO_LABEL = {
 };
 const EJ_BG = ['#ffffff', '#f8f9fb', '#f4f6f9', '#f0f3f7'];
 
+const NIVEL_CONFIANZA_LABEL = { A: 'alta', B: 'media', C: 'baja' };
+
+// ── Conversión de unidades (mismo factor que Calculador1RM en el backend) ──
+const KG_POR_LB = 0.45359237;
+const LB_POR_KG = 2.20462262;
+
+/**
+ * Convierte un valor numérico de una unidad a otra, redondeando al
+ * incremento realista de carga (2.5 en kg, 5 en lb) — igual que hace
+ * el backend en Calculador1RM::redondear(). Si no hay valor numérico
+ * válido o las unidades son iguales, devuelve el valor tal cual.
+ */
+function convertirPeso(valor, deUnidad, aUnidad) {
+  const v = parseFloat(valor);
+  if (!v || !isFinite(v) || deUnidad === aUnidad) return valor;
+  const factor = deUnidad === 'kg' ? LB_POR_KG : KG_POR_LB;
+  const convertido = v * factor;
+  const paso = aUnidad === 'lb' ? 5 : 2.5;
+  return String(Math.round(convertido / paso) * paso);
+}
+
+/**
+ * Cambia la unidad (kg↔lb) de un campo de peso, convirtiendo el
+ * número para que siga representando el mismo peso físico.
+ *
+ * Si el estado actual es 'sugerido' (el cliente todavía no confirmó
+ * esa serie), el peso que se ve viene del campo *_sugerido, no del
+ * campo real — así que hay que convertir y guardar ahí, y actualizar
+ * 'peso_sugerido_unidad' (que es lo que resolverEstadoPeso() usa para
+ * decidir en qué unidad mostrar la sugerencia). Si además el campo
+ * real ya tenía algo puesto (aunque no se esté mostrando porque no es
+ * 'confirmado'), también se sincroniza para no dejar datos inconsistentes.
+ *
+ * Si el estado es 'vacio' o 'confirmado', se convierte directamente
+ * el campo real de peso.
+ */
+function toggleUnidadPeso({
+  onChange, pesoKey, unidadKey, sugeridoKey,
+  estadoActual, valorActual, unidadActual,
+}) {
+  const nuevaUnidad = unidadActual === 'kg' ? 'lb' : 'kg';
+
+  if (estadoActual === 'sugerido' && sugeridoKey) {
+    const nuevoValor = convertirPeso(valorActual, unidadActual, nuevaUnidad);
+    onChange(sugeridoKey, nuevoValor);
+    onChange('peso_sugerido_unidad', nuevaUnidad);
+    onChange(unidadKey, nuevaUnidad);
+    return;
+  }
+
+  const nuevoValor = convertirPeso(valorActual, unidadActual, nuevaUnidad);
+  onChange(pesoKey, nuevoValor);
+  onChange(unidadKey, nuevaUnidad);
+}
+
+/**
+ * Determina si una serie ya tiene lo necesario para poder marcarse
+ * como "Listo". Cuenta como completa tanto un peso puesto por el
+ * cliente/entrenador como un peso SUGERIDO por el sistema (calculado
+ * a partir del 1RM) — así el cliente no está obligado a confirmar
+ * manualmente el peso si ya hay una sugerencia disponible.
+ *
+ * Los métodos sin sugerencia automática (21s, isometría, parciales,
+ * negativas) siguen exigiendo que el peso esté puesto explícitamente.
+ */
 function serieCompleta(serie) {
   const m = serie.metodo ?? 'normal';
-  if (m === '888')       return !!(serie.peso1 && serie.peso2 && serie.peso3);
+
+  const tienePeso = (pesoKey, sugeridoKey) => {
+    const v = serie[pesoKey];
+    const explicito = v != null && v !== '' && parseFloat(v) > 0;
+    return explicito || (sugeridoKey && serie[sugeridoKey] != null);
+  };
+
+  if (m === '888') {
+    return tienePeso('peso1', 'peso1_sugerido')
+        && tienePeso('peso2', 'peso2_sugerido')
+        && tienePeso('peso3', 'peso3_sugerido');
+  }
+  if (m === '10_21')     return tienePeso('peso_10', 'peso_10_sugerido');
+  if (m === 'restpause') return tienePeso('peso_rp', 'peso_sugerido');
+  if (m === 'forzadas')  return tienePeso('peso_fz', 'peso_sugerido');
   if (m === '21s')       return !!serie.peso_21s;
-  if (m === '10_21')     return !!serie.peso_10;
   if (m === 'isometria') return !!serie.peso_iso;
-  if (m === 'forzadas')  return !!serie.peso_fz;
   if (m === 'parciales') return !!serie.peso_pc;
   if (m === 'negativas') return !!serie.peso_ng;
-  return !!serie.peso;
+
+  return tienePeso('peso', 'peso_sugerido');
+}
+
+/**
+ * Copia el peso SUGERIDO al campo de peso real cuando el cliente no
+ * puso nada manualmente. Se llama justo antes de marcar una serie
+ * como completada, para que:
+ *  - el registro que se guarda/envía al backend sea un peso real
+ *    (no solo la sugerencia), y así se pueda usar para el 1RM.
+ *  - el PesoTrigger deje de mostrar "≈" y pase a verse como
+ *    confirmado, igual que si el cliente lo hubiera tocado.
+ *
+ * Si el cliente ya puso un peso explícito, no se toca nada. Nótese
+ * que el peso_sugerido y su unidad ya vienen consistentes entre sí
+ * (si el cliente togglea kg/lb antes de completar la serie, ambos se
+ * actualizan juntos en toggleUnidadPeso), así que copiar unidadKey
+ * desde peso_sugerido_unidad aquí es seguro.
+ */
+function aplicarSugeridoSiFalta(serie) {
+  const copiar = (pesoKey, sugeridoKey, unidadKey) => {
+    const actual = serie[pesoKey];
+    const tieneActual = actual != null && actual !== '' && parseFloat(actual) > 0;
+    if (!tieneActual && serie[sugeridoKey] != null) {
+      serie[pesoKey] = String(serie[sugeridoKey]);
+      if (serie.peso_sugerido_unidad) serie[unidadKey] = serie.peso_sugerido_unidad;
+    }
+  };
+
+  const m = serie.metodo ?? 'normal';
+  if (m === 'normal')         copiar('peso', 'peso_sugerido', 'unidad');
+  else if (m === 'restpause') copiar('peso_rp', 'peso_sugerido', 'unidad_rp');
+  else if (m === 'forzadas')  copiar('peso_fz', 'peso_sugerido', 'unidad_fz');
+  else if (m === '888') {
+    copiar('peso1', 'peso1_sugerido', 'unidad1');
+    copiar('peso2', 'peso2_sugerido', 'unidad2');
+    copiar('peso3', 'peso3_sugerido', 'unidad3');
+  } else if (m === '10_21') {
+    copiar('peso_10', 'peso_10_sugerido', 'unidad_10');
+    copiar('peso_21', 'peso_21_sugerido', 'unidad_21');
+  }
+  return serie;
 }
 
 // Formatea segundos totales -> "1m 30s" / "45s" / "2m" / null si no hay valor
@@ -149,7 +267,6 @@ export default function RutinaScreen({ route }) {
   const [saveStatus, setSaveStatus] = useState('idle'); // idle | saving | saved | error
 
   const [selectorVisible, setSelectorVisible] = useState(false);
-  const [selectorOpts, setSelectorOpts]       = useState([]);
   const [selectorVal, setSelectorVal]         = useState('');
   const [selectorCb, setSelectorCb]           = useState(null);
   const [selectorTitulo, setSelectorTitulo]   = useState('');
@@ -168,14 +285,32 @@ export default function RutinaScreen({ route }) {
   function cerrarImagen() { setImgModal(prev => ({ ...prev, visible:false })); }
   function abrirVideo(url, nombre) { setVideoUrl(url ?? ''); setVideoTitulo(nombre ?? ''); setVideoVisible(true); }
   function abrirSelector(opciones, valorActual, titulo, callback) {
-    setSelectorOpts(opciones);
-    setSelectorVal(valorActual ?? '');
+    setSelectorVal(valorActual != null ? String(valorActual) : '');
     setSelectorTitulo(titulo);
     setSelectorCb(() => callback);
     setSelectorVisible(true);
   }
   function cerrarSelector() { setSelectorVisible(false); }
-  function seleccionarOpcion(val) { if (selectorCb) selectorCb(val); setSelectorVisible(false); }
+
+  // Limpia lo que el cliente escribe: solo dígitos y un punto decimal
+  // (acepta coma como separador decimal y la convierte a punto).
+  function cambiarSelectorVal(texto) {
+    let limpio = texto.replace(',', '.').replace(/[^0-9.]/g, '');
+    const partes = limpio.split('.');
+    if (partes.length > 2) limpio = partes[0] + '.' + partes.slice(1).join('');
+    setSelectorVal(limpio);
+  }
+
+  function confirmarPesoManual() {
+    const valor = (selectorVal ?? '').trim();
+    if (selectorCb) selectorCb(valor);
+    setSelectorVisible(false);
+  }
+
+  function limpiarPesoManual() {
+    if (selectorCb) selectorCb('');
+    setSelectorVisible(false);
+  }
 
   useEffect(() => {
     fetch(`${API_URL}/rutina/${clienteId}/${semana}/${dia}`)
@@ -213,11 +348,17 @@ export default function RutinaScreen({ route }) {
     });
   }
 
+  // Al completar una serie: si algún ejercicio del bloque no tiene
+  // peso propio pero sí tiene un peso sugerido, se usa la sugerencia
+  // como registro real — así el cliente no necesita confirmar el
+  // peso a mano cuando ya hay una sugerencia disponible.
   function completarBloquesSerie(bi, si) {
     setData(prev => {
       const next = cloneBloques(prev);
       next[bi].ejercicios.forEach((_, ei) => {
-        next[bi].ejercicios[ei].series[si].completada = true;
+        const serie = next[bi].ejercicios[ei].series[si];
+        aplicarSugeridoSiFalta(serie);
+        serie.completada = true;
       });
       // Autosave inmediato al completar serie
       if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -351,29 +492,38 @@ export default function RutinaScreen({ route }) {
       />
 
       <Modal visible={selectorVisible} transparent animationType="slide" onRequestClose={cerrarSelector}>
-        <View style={s.modalWrap}>
+        <KeyboardAvoidingView
+          style={s.modalWrap}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+        >
           <TouchableOpacity style={s.modalFondo} activeOpacity={1} onPress={cerrarSelector} />
           <View style={s.modalSheet}>
             <View style={s.modalHandle} />
             <Text style={s.modalTitle}>{selectorTitulo}</Text>
-            <ScrollView bounces={false} showsVerticalScrollIndicator={false} style={s.modalScroll}>
-              {selectorOpts.map(item => {
-                const sel = item.value === selectorVal;
-                return (
-                  <TouchableOpacity
-                    key={item.value}
-                    style={[s.modalOpt, sel && s.modalOptSel]}
-                    onPress={() => seleccionarOpcion(item.value)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[s.modalOptTxt, sel && s.modalOptTxtSel]}>{item.label}</Text>
-                    {sel && <Text style={s.modalOptCheck}>✓</Text>}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+            <View style={s.pesoInputWrap}>
+              <TextInput
+                style={s.pesoInput}
+                value={selectorVal}
+                onChangeText={cambiarSelectorVal}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor="#d1d5db"
+                autoFocus
+                selectTextOnFocus
+                onSubmitEditing={confirmarPesoManual}
+              />
+            </View>
+            <View style={s.pesoInputBtnRow}>
+              <TouchableOpacity style={s.pesoInputBtnLimpiar} onPress={limpiarPesoManual} activeOpacity={0.75}>
+                <Text style={s.pesoInputBtnLimpiarTxt}>Sin peso</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.pesoInputBtnConfirmar} onPress={confirmarPesoManual} activeOpacity={0.85}>
+                <Text style={s.pesoInputBtnConfirmarTxt}>Confirmar</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <VideoModal
@@ -582,16 +732,16 @@ function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done, desc
       </View>
       <Text style={s.serieNum}>S{serieIdx + 1}</Text>
 
-      {m === 'normal'    && <CamposNormal    serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === 'restpause' && <CamposRestpause serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === '888'       && <Campos888       serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === '21s'       && <Campos21s       serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === '10_21'     && <Campos10_21     serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === 'isometria' && <CamposIsometria serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
-      {m === 'forzadas'  && <CamposForzadas  serie={serie} onChange={onChange} abrirSelector={abrirSelector} />}
+      {m === 'normal'    && <CamposNormal    serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === 'restpause' && <CamposRestpause serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === '888'       && <Campos888       serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === '21s'       && <Campos21s       serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === '10_21'     && <Campos10_21     serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === 'isometria' && <CamposIsometria serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
+      {m === 'forzadas'  && <CamposForzadas  serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done} />}
       {(m === 'parciales' || m === 'negativas') && (
         <CamposSimple
-          serie={serie} onChange={onChange} abrirSelector={abrirSelector}
+          serie={serie} onChange={onChange} abrirSelector={abrirSelector} done={done}
           pesoKey={m === 'parciales' ? 'peso_pc' : 'peso_ng'}
         />
       )}
@@ -622,31 +772,121 @@ function SerieCol({ serie, serieIdx, isLast, onChange, abrirSelector, done, desc
 /* ─────────────────────────────────────────
    CAMPOS POR MÉTODO
 ───────────────────────────────────────── */
-function PesoTrigger({ value, unidad, onPress, onToggleUnidad }) {
-  const isEmpty = !value || value === '';
+
+/**
+ * Trigger de peso. Trabaja con tres estados:
+ * - 'vacio':      no hay ningún número (ni el entrenador puso peso, ni
+ *                 hay 1RM calculado todavía). Guion ámbar.
+ * - 'sugerido':   hay un número, pero el CLIENTE todavía no confirmó
+ *                 esa serie (no tocó "Listo"). Se ve celeste, con "≈".
+ * - 'confirmado': la serie ya está marcada como hecha (completada).
+ *                 Se muestra en texto normal — es el registro real
+ *                 del cliente.
+ */
+function PesoTrigger({ estado, valor, unidad, onPress, onToggleUnidad }) {
+  const esVacio    = estado === 'vacio';
+  const esSugerido = estado === 'sugerido';
+
+  const textoValor = esVacio ? '–' : (esSugerido ? `≈${valor}` : `${valor}`);
+
   return (
-    <View style={s.pesoRow}>
-      <TouchableOpacity
-        style={[s.pesoTrigger, isEmpty && s.pesoTriggerVacio]}
-        onPress={onPress}
-        activeOpacity={0.7}
-      >
-        <Text style={[s.pesoTriggerVal, isEmpty && s.pesoTriggerValVacio]} numberOfLines={1}>
-          {isEmpty ? '–' : `${value}`}
-        </Text>
-        <Text style={s.pesoTriggerArr}>▾</Text>
-      </TouchableOpacity>
-      <TouchableOpacity style={s.unidadBtn} onPress={onToggleUnidad} activeOpacity={0.7}>
-        <Text style={s.unidadBtnText}>{unidad ?? 'kg'}</Text>
-      </TouchableOpacity>
+    <View style={s.pesoWrap}>
+      <View style={s.pesoRow}>
+        <TouchableOpacity
+          style={[
+            s.pesoTrigger,
+            esVacio && s.pesoTriggerVacio,
+            esSugerido && s.pesoTriggerSugerido,
+          ]}
+          onPress={onPress}
+          activeOpacity={0.7}
+        >
+          <Text
+            style={[
+              s.pesoTriggerVal,
+              esVacio && s.pesoTriggerValVacio,
+              esSugerido && s.pesoTriggerValSugerido,
+            ]}
+            numberOfLines={1}
+          >
+            {textoValor}
+          </Text>
+          <Text style={s.pesoTriggerArr}>▾</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={s.unidadBtn} onPress={onToggleUnidad} activeOpacity={0.7}>
+          <Text style={s.unidadBtnText}>{unidad ?? 'kg'}</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
-function abrirPeso(abrirSelector, pesoKey, unidad, unidadKey, serie, onChange) {
-  const u    = serie[unidadKey] ?? unidad ?? 'kg';
-  const opts = generarOpciones(u);
-  abrirSelector(opts, serie[pesoKey] ?? '', `Peso (${u})`, val => onChange(pesoKey, val));
+/**
+ * Resuelve qué mostrar en el PesoTrigger de un campo de peso concreto.
+ * Además de si la serie ya está confirmada (done) o si hay peso
+ * explícito/sugerido, revisa un flag "<campo>_manual": se activa en
+ * cuanto el CLIENTE confirma algo en el modal de peso (lo haya
+ * cambiado o no) — desde ese momento el campo se ve como su propio
+ * registro (negro, sin "≈"), sin necesidad de esperar a que toque
+ * "Listo" para toda la serie.
+ *
+ * sugeridoKey puede ser null para métodos sin sugerencia automática
+ * (21s, isometría, parciales, negativas) — en ese caso, si no hay peso
+ * explícito, el campo queda 'vacio' igual que siempre.
+ */
+function resolverEstadoPeso(serie, done, pesoKey, unidadKey, sugeridoKey) {
+  const pesoRaw = serie[pesoKey];
+  const pesoExplicito = pesoRaw != null && pesoRaw !== '' && parseFloat(pesoRaw) > 0;
+  const confirmadoPorCliente = !!serie[`${pesoKey}_manual`];
+
+  if (done || confirmadoPorCliente) {
+    return {
+      estado: pesoExplicito ? 'confirmado' : 'vacio',
+      valor: pesoRaw,
+      unidad: serie[unidadKey] ?? 'kg',
+    };
+  }
+
+  if (pesoExplicito) {
+    return { estado: 'sugerido', valor: pesoRaw, unidad: serie[unidadKey] ?? 'kg' };
+  }
+
+  if (sugeridoKey && serie[sugeridoKey] != null) {
+    return {
+      estado: 'sugerido',
+      valor: serie[sugeridoKey],
+      unidad: serie.peso_sugerido_unidad ?? serie[unidadKey] ?? 'kg',
+    };
+  }
+
+  return { estado: 'vacio', valor: null, unidad: serie[unidadKey] ?? 'kg' };
+}
+
+/**
+ * Abre el selector de peso, ya posicionado en `valorInicial` (el valor
+ * que se estaba mostrando en el trigger — sea el peso confirmado, el
+ * que puso el entrenador, o el calculado) y en su unidad. Así,
+ * confirmar lo que ya se ve es un solo toque; cambiarlo es igual de
+ * fácil que siempre.
+ */
+function abrirPeso(abrirSelector, pesoKey, unidadKey, unidadDefault, serie, onChange, valorInicial, unidadInicial) {
+  const unidadActual  = serie[unidadKey] ?? unidadDefault ?? 'kg';
+  const unidadParaUsar = unidadInicial ?? unidadActual;
+
+  const opts  = generarOpciones(unidadParaUsar);
+  const valor = (valorInicial != null && valorInicial !== '') ? String(valorInicial) : '';
+
+  abrirSelector(opts, valor, `Peso (${unidadParaUsar})`, val => {
+    onChange(pesoKey, val);
+    // En cuanto el cliente confirma algo en el modal (lo haya cambiado
+    // o no), se considera SU registro — deja de verse como sugerencia.
+    // Si borra el valor ("Sin peso"), vuelve a quedar disponible para
+    // mostrar la sugerencia de nuevo.
+    onChange(`${pesoKey}_manual`, val !== '');
+    if (unidadParaUsar !== unidadActual) {
+      onChange(unidadKey, unidadParaUsar);
+    }
+  });
 }
 
 function RepsRow({ label, value }) {
@@ -658,24 +898,40 @@ function RepsRow({ label, value }) {
   );
 }
 
-function CamposNormal({ serie, onChange, abrirSelector }) {
+function CamposNormal({ serie, onChange, abrirSelector, done }) {
+  const est = resolverEstadoPeso(serie, done, 'peso', 'unidad', 'peso_sugerido');
   return (
     <>
       <RepsRow label="Reps" value={serie.reps} />
-      <PesoTrigger value={serie.peso} unidad={serie.unidad ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso', 'kg', 'unidad', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad', (serie.unidad ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso', 'unidad', 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey: 'peso', unidadKey: 'unidad', sugeridoKey: 'peso_sugerido',
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
     </>
   );
 }
 
-function CamposRestpause({ serie, onChange, abrirSelector }) {
+function CamposRestpause({ serie, onChange, abrirSelector, done }) {
+  const est = resolverEstadoPeso(serie, done, 'peso_rp', 'unidad_rp', 'peso_sugerido');
   return (
     <>
       <RepsRow label="Reps" value={serie.reps_rp ?? serie.reps} />
-      <PesoTrigger value={serie.peso_rp ?? serie.peso} unidad={serie.unidad_rp ?? serie.unidad ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso_rp', 'kg', 'unidad_rp', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad_rp', (serie.unidad_rp ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso_rp', 'unidad_rp', 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey: 'peso_rp', unidadKey: 'unidad_rp', sugeridoKey: 'peso_sugerido',
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
       <View style={s.metodoNota}>
         <Text style={s.metodoNotaText}>Fallo → {serie.descanso ?? 15}s</Text>
       </View>
@@ -683,93 +939,207 @@ function CamposRestpause({ serie, onChange, abrirSelector }) {
   );
 }
 
-function Campos888({ serie, onChange, abrirSelector }) {
+function Campos888({ serie, onChange, abrirSelector, done }) {
   const r = serie.reps_888 ?? 8;
+
+  const est1 = resolverEstadoPeso(serie, done, 'peso1', 'unidad1', 'peso1_sugerido');
+  const est2 = resolverEstadoPeso(serie, done, 'peso2', 'unidad2', 'peso2_sugerido');
+  const est3 = resolverEstadoPeso(serie, done, 'peso3', 'unidad3', 'peso3_sugerido');
+
+  // Los 3 tramos del dropset comparten el campo 'peso_sugerido_unidad'
+  // que manda el backend (todos vienen del mismo 1RM). Si cada tramo
+  // togglea su unidad por separado, ese campo compartido queda con la
+  // unidad del ÚLTIMO tramo tocado, y los otros dos quedan mostrando
+  // una etiqueta de unidad que ya no corresponde a su número (porque
+  // solo se convirtió el valor del tramo que se tocó). Por eso hay
+  // que togglear los tres juntos, siempre, en el mismo click.
+  function toggleUnidad888() {
+    const nuevaUnidad = est1.unidad === 'kg' ? 'lb' : 'kg';
+
+    [
+      { pesoKey: 'peso1', unidadKey: 'unidad1', sugeridoKey: 'peso1_sugerido', est: est1 },
+      { pesoKey: 'peso2', unidadKey: 'unidad2', sugeridoKey: 'peso2_sugerido', est: est2 },
+      { pesoKey: 'peso3', unidadKey: 'unidad3', sugeridoKey: 'peso3_sugerido', est: est3 },
+    ].forEach(({ pesoKey, unidadKey, sugeridoKey, est }) => {
+      if (est.estado === 'sugerido') {
+        onChange(sugeridoKey, convertirPeso(est.valor, est.unidad, nuevaUnidad));
+      } else if (est.valor != null && est.valor !== '') {
+        onChange(pesoKey, convertirPeso(est.valor, est.unidad, nuevaUnidad));
+      }
+      onChange(unidadKey, nuevaUnidad);
+    });
+
+    onChange('peso_sugerido_unidad', nuevaUnidad);
+  }
+
+  function campoPeso(est, pesoKey, unidadKey, label) {
+    return (
+      <>
+        <Text style={s.pesoSubLabel}>{label}</Text>
+        <PesoTrigger
+          estado={est.estado}
+          valor={est.valor}
+          unidad={est.unidad}
+          onPress={() => abrirPeso(abrirSelector, pesoKey, unidadKey, 'kg', serie, onChange, est.valor, est.unidad)}
+          onToggleUnidad={toggleUnidad888} />
+      </>
+    );
+  }
+
   return (
     <>
       <RepsRow label="Reps" value={`${r}+${r}+${r}`} />
-      <Text style={s.pesoSubLabel}>P1</Text>
-      <PesoTrigger value={serie.peso1} unidad={serie.unidad1 ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso1', 'kg', 'unidad1', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad1', (serie.unidad1 ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
-      <Text style={s.pesoSubLabel}>P2</Text>
-      <PesoTrigger value={serie.peso2} unidad={serie.unidad2 ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso2', 'kg', 'unidad2', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad2', (serie.unidad2 ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
-      <Text style={s.pesoSubLabel}>P3</Text>
-      <PesoTrigger value={serie.peso3} unidad={serie.unidad3 ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso3', 'kg', 'unidad3', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad3', (serie.unidad3 ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      {campoPeso(est1, 'peso1', 'unidad1', 'P1')}
+      {campoPeso(est2, 'peso2', 'unidad2', 'P2')}
+      {campoPeso(est3, 'peso3', 'unidad3', 'P3')}
     </>
   );
 }
 
-function Campos21s({ serie, onChange, abrirSelector }) {
+function Campos21s({ serie, onChange, abrirSelector, done }) {
   const r = serie.reps_21s ?? 7;
+  const est = resolverEstadoPeso(serie, done, 'peso_21s', 'unidad_21s', null);
   return (
     <>
       <RepsRow label="Reps" value={`${r}+${r}+${r}`} />
-      <PesoTrigger value={serie.peso_21s} unidad={serie.unidad_21s ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso_21s', 'kg', 'unidad_21s', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad_21s', (serie.unidad_21s ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso_21s', 'unidad_21s', 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey: 'peso_21s', unidadKey: 'unidad_21s', sugeridoKey: null,
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
     </>
   );
 }
 
-function Campos10_21({ serie, onChange, abrirSelector }) {
+function Campos10_21({ serie, onChange, abrirSelector, done }) {
   function calcular40(v) {
     const p = parseFloat(v) || 0;
     return p > 0 ? String(Math.round(p * 0.6 * 2) / 2) : '';
   }
+
+  const est10 = resolverEstadoPeso(serie, done, 'peso_10', 'unidad_10', 'peso_10_sugerido');
+  const est21 = resolverEstadoPeso(serie, done, 'peso_21', 'unidad_21', 'peso_21_sugerido');
+
+  // El campo ×21s se deriva siempre del ×10 con la regla −40%, así que
+  // togglear su unidad debe togglear la del ×10 (que arrastra al ×21s
+  // recalculado), no tratarlo como un campo independiente.
+  function toggleUnidad10y21() {
+    const nuevaUnidad = est10.unidad === 'kg' ? 'lb' : 'kg';
+
+    if (est10.estado === 'sugerido') {
+      const nuevoValor10 = convertirPeso(est10.valor, est10.unidad, nuevaUnidad);
+      const nuevoValor21 = convertirPeso(est21.valor, est21.unidad, nuevaUnidad);
+      onChange('peso_10_sugerido', nuevoValor10);
+      onChange('peso_21_sugerido', nuevoValor21);
+      onChange('peso_sugerido_unidad', nuevaUnidad);
+      onChange('unidad_10', nuevaUnidad);
+      onChange('unidad_21', nuevaUnidad);
+      return;
+    }
+
+    const nuevoValor10 = convertirPeso(est10.valor, est10.unidad, nuevaUnidad);
+    onChange('peso_10', nuevoValor10);
+    onChange('peso_21', calcular40(nuevoValor10));
+    onChange('unidad_10', nuevaUnidad);
+    onChange('unidad_21', nuevaUnidad);
+  }
+
   return (
     <>
       <Text style={s.pesoSubLabel}>×10</Text>
-      <PesoTrigger value={serie.peso_10} unidad={serie.unidad_10 ?? 'kg'}
-        onPress={() => abrirSelector(generarOpciones(serie.unidad_10 ?? 'kg'), serie.peso_10 ?? '', 'Peso ×10',
-          v => { onChange('peso_10', v); onChange('peso_21', calcular40(v)); })}
-        onToggleUnidad={() => onChange('unidad_10', (serie.unidad_10 ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est10.estado}
+        valor={est10.valor}
+        unidad={est10.unidad}
+        onPress={() => {
+          const opts = generarOpciones(est10.unidad);
+          const valorInicial = est10.valor != null ? String(est10.valor) : '';
+          abrirSelector(opts, valorInicial, `Peso ×10 (${est10.unidad})`, v => {
+            onChange('peso_10', v);
+            onChange('peso_10_manual', v !== '');
+            onChange('peso_21', calcular40(v));
+            onChange('peso_21_manual', v !== ''); // se autocalculó a partir de lo que el cliente puso
+            if (est10.unidad !== (serie.unidad_10 ?? 'kg')) {
+              onChange('unidad_10', est10.unidad);
+              onChange('unidad_21', est10.unidad);
+            }
+          });
+        }}
+        onToggleUnidad={toggleUnidad10y21} />
       <Text style={s.pesoSubLabel}>×21s</Text>
-      <PesoTrigger value={serie.peso_21} unidad={serie.unidad_21 ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso_21', 'kg', 'unidad_21', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad_21', (serie.unidad_21 ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est21.estado}
+        valor={est21.valor}
+        unidad={est21.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso_21', 'unidad_21', 'kg', serie, onChange, est21.valor, est21.unidad)}
+        onToggleUnidad={toggleUnidad10y21} />
       <View style={s.metodoNota}><Text style={s.metodoNotaText}>−40%→21s</Text></View>
     </>
   );
 }
 
-function CamposIsometria({ serie, onChange, abrirSelector }) {
+function CamposIsometria({ serie, onChange, abrirSelector, done }) {
+  const est = resolverEstadoPeso(serie, done, 'peso_iso', 'unidad_iso', null);
   return (
     <>
-      <PesoTrigger value={serie.peso_iso} unidad={serie.unidad_iso ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso_iso', 'kg', 'unidad_iso', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad_iso', (serie.unidad_iso ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso_iso', 'unidad_iso', 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey: 'peso_iso', unidadKey: 'unidad_iso', sugeridoKey: null,
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
       <RepsRow label="R/brazo" value={serie.reps_brazo ?? 4} />
       <RepsRow label="R/ambos" value={serie.reps_ambos ?? 8} />
     </>
   );
 }
 
-function CamposForzadas({ serie, onChange, abrirSelector }) {
+function CamposForzadas({ serie, onChange, abrirSelector, done }) {
+  const est = resolverEstadoPeso(serie, done, 'peso_fz', 'unidad_fz', 'peso_sugerido');
   return (
     <>
       <RepsRow label="Solo"  value={serie.reps_fz  ?? serie.reps} />
       <RepsRow label="Asist" value={serie.reps_asistidas ?? '–'} />
-      <PesoTrigger value={serie.peso_fz} unidad={serie.unidad_fz ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, 'peso_fz', 'kg', 'unidad_fz', serie, onChange)}
-        onToggleUnidad={() => onChange('unidad_fz', (serie.unidad_fz ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, 'peso_fz', 'unidad_fz', 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey: 'peso_fz', unidadKey: 'unidad_fz', sugeridoKey: 'peso_sugerido',
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
     </>
   );
 }
 
-function CamposSimple({ serie, onChange, abrirSelector, pesoKey }) {
+function CamposSimple({ serie, onChange, abrirSelector, pesoKey, done }) {
   const unidadKey = pesoKey === 'peso_pc' ? 'unidad_pc' : 'unidad_ng';
   const repsKey   = pesoKey === 'peso_pc' ? 'reps_pc'   : 'reps_ng';
+  const est = resolverEstadoPeso(serie, done, pesoKey, unidadKey, null);
   return (
     <>
       <RepsRow label="Reps" value={serie[repsKey] ?? serie.reps} />
-      <PesoTrigger value={serie[pesoKey]} unidad={serie[unidadKey] ?? 'kg'}
-        onPress={() => abrirPeso(abrirSelector, pesoKey, 'kg', unidadKey, serie, onChange)}
-        onToggleUnidad={() => onChange(unidadKey, (serie[unidadKey] ?? 'kg') === 'kg' ? 'lb' : 'kg')} />
+      <PesoTrigger
+        estado={est.estado}
+        valor={est.valor}
+        unidad={est.unidad}
+        onPress={() => abrirPeso(abrirSelector, pesoKey, unidadKey, 'kg', serie, onChange, est.valor, est.unidad)}
+        onToggleUnidad={() => toggleUnidadPeso({
+          onChange,
+          pesoKey, unidadKey, sugeridoKey: null,
+          estadoActual: est.estado, valorActual: est.valor, unidadActual: est.unidad,
+        })} />
     </>
   );
 }
@@ -963,14 +1333,19 @@ const s = StyleSheet.create({
                             alignItems:'center', borderWidth:1, borderColor:'#a7f3d0' },
   descansoSerieBadgeText: { fontSize:9, fontWeight:'700', color:'#059669' },
 
-  pesoRow:             { flexDirection:'row', alignItems:'center', width:'100%', gap:3, marginTop:4 },
+  // ── Peso: normal / sugerido ──
+  pesoWrap:            { width:'100%', marginTop:4 },
+  pesoRow:             { flexDirection:'row', alignItems:'center', width:'100%', gap:3 },
   pesoTrigger:         { flex:1, flexDirection:'row', alignItems:'center', justifyContent:'space-between',
                          height:32, borderWidth:1.5, borderColor:'#d0d5dd', borderRadius:6,
                          paddingHorizontal:7, backgroundColor:'white' },
   pesoTriggerVacio:    { borderColor:'#fcd34d', borderStyle:'dashed', backgroundColor:'#fffbeb' },
+  pesoTriggerSugerido: { borderColor:'#93c5fd', borderStyle:'dashed', backgroundColor:'#eff6ff' },
   pesoTriggerVal:      { fontSize:14, fontWeight:'600', color:'#111827', flex:1 },
   pesoTriggerValVacio: { color:'#d97706' },
+  pesoTriggerValSugerido: { fontSize:14, fontWeight:'700', color:'#2563eb', flex:1 },
   pesoTriggerArr:      { fontSize:10, color:'#9ca3af' },
+  pesoSugeridoNota:    { fontSize:8, color:'#60a5fa', fontWeight:'600', marginTop:2, textAlign:'center' },
   unidadBtn:           { width:28, height:32, borderWidth:1, borderColor:'#d0d5dd', borderRadius:6,
                          alignItems:'center', justifyContent:'center', backgroundColor:'#f9fafb' },
   unidadBtnText:       { fontSize:9, color:'#6b7280', fontWeight:'600' },
@@ -998,13 +1373,19 @@ const s = StyleSheet.create({
                     alignSelf:'center', marginTop:10, marginBottom:2 },
   modalTitle:     { fontSize:14, fontWeight:'700', color:'#111827', textAlign:'center',
                     paddingVertical:12, borderBottomWidth:1, borderBottomColor:'#f3f4f6' },
-  modalScroll:    { maxHeight:340 },
-  modalOpt:       { height:48, paddingHorizontal:24, flexDirection:'row', alignItems:'center',
-                    justifyContent:'space-between', borderBottomWidth:0.5, borderBottomColor:'#f3f4f6' },
-  modalOptSel:    { backgroundColor:'#eff6ff' },
-  modalOptTxt:    { fontSize:16, color:'#374151' },
-  modalOptTxtSel: { color:'#2563eb', fontWeight:'600' },
-  modalOptCheck:  { fontSize:16, color:'#2563eb' },
+
+  // ── Entrada manual de peso ──
+  pesoInputWrap:        { paddingHorizontal:24, paddingTop:24, paddingBottom:8, alignItems:'center' },
+  pesoInput:            { fontSize:36, fontWeight:'800', color:'#111827', textAlign:'center',
+                          minWidth:140, paddingVertical:6, paddingHorizontal:12,
+                          borderBottomWidth:2, borderBottomColor:'#2563eb' },
+  pesoInputBtnRow:      { flexDirection:'row', gap:10, paddingHorizontal:20, paddingTop:16, paddingBottom:28 },
+  pesoInputBtnLimpiar:  { flex:1, paddingVertical:13, borderRadius:10, borderWidth:1.5,
+                          borderColor:'#e2e5ea', alignItems:'center', backgroundColor:'white' },
+  pesoInputBtnLimpiarTxt: { fontSize:14, fontWeight:'700', color:'#6b7280' },
+  pesoInputBtnConfirmar: { flex:2, paddingVertical:13, borderRadius:10,
+                          backgroundColor:'#2563eb', alignItems:'center' },
+  pesoInputBtnConfirmarTxt: { fontSize:14, fontWeight:'700', color:'white' },
 
   toast:     { position:'absolute', bottom:32, alignSelf:'center', backgroundColor:'#111827',
                borderRadius:99, paddingVertical:8, paddingHorizontal:20 },

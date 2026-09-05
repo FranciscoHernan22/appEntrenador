@@ -59,8 +59,12 @@ export default function LoginScreen({ navigation }) {
       >
         {/* Logo / título */}
         <View style={styles.logoWrap}>
-          <Text style={styles.logoIcon}>💪</Text>
-          <Text style={styles.logoTitulo}>GymApp</Text>
+          <View style={styles.logoMark}>
+            <Text style={styles.logoMarkText}>HF</Text>
+          </View>
+          <Text style={styles.logoTitulo}>
+            Hernan<Text style={styles.logoTituloAccent}>Force</Text>
+          </Text>
           <Text style={styles.logoSub}>Tu entrenamiento personalizado</Text>
         </View>
 
@@ -112,7 +116,7 @@ export default function LoginScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#0B1120',
   },
   inner: {
     flex: 1,
@@ -129,16 +133,41 @@ const styles = StyleSheet.create({
     fontSize: 56,
     marginBottom: 10,
   },
+  logoMark: {
+    width: 84,
+    height: 84,
+    borderRadius: 22,
+    backgroundColor: '#1F2937',
+    borderWidth: 2,
+    borderColor: '#EF4444',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 18,
+    shadowColor: '#EF4444',
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  logoMarkText: {
+    color: '#FCA5A5',
+    fontSize: 30,
+    fontWeight: '800',
+    letterSpacing: 1,
+  },
   logoTitulo: {
     color: '#F8FAFC',
-    fontSize: 32,
-    fontWeight: 'bold',
-    letterSpacing: 1,
+    fontSize: 42,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  logoTituloAccent: {
+    color: '#FCA5A5',
   },
   logoSub: {
     color: '#64748B',
-    fontSize: 14,
-    marginTop: 6,
+    fontSize: 15,
+    marginTop: 8,
   },
 
   // Form
@@ -153,20 +182,25 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   input: {
-    backgroundColor: '#1E293B',
+    backgroundColor: '#111827',
     borderRadius: 12,
     padding: 14,
     color: '#F1F5F9',
     fontSize: 15,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#1F2937',
   },
   btnLogin: {
-    backgroundColor: '#3B82F6',
+    backgroundColor: '#EF4444',
     borderRadius: 12,
     paddingVertical: 15,
     alignItems: 'center',
     marginTop: 24,
+    shadowColor: '#EF4444',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 4,
   },
   btnLoginText: {
     color: 'white',
